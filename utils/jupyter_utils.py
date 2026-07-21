@@ -78,3 +78,60 @@ def register_dlink(source, target, transform=None):
     setattr(target_obj, attr_name, new_link)
 
     return new_link
+
+
+def register_observer(obj, handler, names):
+    """Idempotently attaches `handler` as a traitlets observer on `obj` for
+    the trait named in `names` (e.g. 'value' for a camera's live frames).
+
+    This is the traitlets.observe() equivalent of register_click_handler:
+    re-running a cell that calls obj.observe(handler, names=...) stacks a
+    second live observer, so every update fires the handler twice, then
+    three times, and so on. For a per-frame callback like live inference,
+    that silently multiplies the workload on every re-run -- exactly the
+    kind of thing worth guarding against on resource-constrained hardware.
+
+    This function removes any observer it previously registered on this
+    trait before adding the new one, so re-running the cell always leaves
+    exactly one active observer.
+
+    Args:
+        obj: any HasTraits instance (e.g. a TraitletCamera)
+        handler (function): callback, called with a single "change" dict,
+            per the traitlets observe convention
+        names (str): the trait name to observe, e.g. 'value'
+
+    Returns:
+        None
+    """
+    attr_name = f'_rti_observer_{names}'
+
+    previous_handler = getattr(obj, attr_name, None)
+    if previous_handler is not None:
+        obj.unobserve(previous_handler, names=names)
+
+    obj.observe(handler, names=names)
+    setattr(obj, attr_name, handler)
+
+
+def unregister_observer(obj, names):
+    """Stops a continuous observer previously started with register_observer,
+    if one is currently running.
+
+    Args:
+        obj: any HasTraits instance (e.g. a TraitletCamera)
+        names (str): the trait name that was being observed, e.g. 'value'
+
+    Returns:
+        bool: True if an observer was found and removed, False if none
+            was running
+    """
+    attr_name = f'_rti_observer_{names}'
+
+    previous_handler = getattr(obj, attr_name, None)
+    if previous_handler is None:
+        return False
+
+    obj.unobserve(previous_handler, names=names)
+    delattr(obj, attr_name)
+    return True
