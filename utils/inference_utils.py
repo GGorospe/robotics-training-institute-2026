@@ -16,7 +16,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 import matplotlib.pyplot as plt
 
-from train_utils import build_model, list_class_names, list_image_files, DEFAULT_MODELS_DIR
+from train_utils import build_model, list_class_names, list_image_files, DEFAULT_MODELS_DIR, format_duration
 from jupyter_utils import register_observer, unregister_observer
 
 INFERENCE_TRANSFORM = transforms.Compose([
@@ -95,6 +95,10 @@ def load_model_and_metadata(model_path, models_dir=DEFAULT_MODELS_DIR):
         f"Trained on {training_record['num_train_images']} images, "
         f"best test accuracy: {training_record['best_test_accuracy']:.1%}"
     )
+
+    duration_seconds = training_record.get('training_duration_seconds')
+    if duration_seconds is not None:
+        print(f"Training took {format_duration(duration_seconds)}")
 
     return model, device, class_names, training_record
 

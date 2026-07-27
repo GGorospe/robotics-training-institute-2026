@@ -39,31 +39,18 @@ _behavior_thread = None
 _behavior_loop_running = False
 
 
-def start_behavior_loop(rvr, camera, model, class_names, device, decision_fn, poll_interval=0.5):
-    """Starts a dedicated thread that repeatedly reads the camera,
-    classifies the current frame, and calls decision_fn(rvr, label) to
-    decide what the robot should do next.
-
-    poll_interval must stay comfortably under the RVR's ~2 second
-    command-timeout window -- the default of 0.5s means decision_fn gets
-    called, and can re-issue a drive command, about twice a second, so a
-    "keep driving" decision never goes stale enough for the RVR's own
-    safety timeout to kick in.
-
-    Idempotent: stops any previously running behavior loop first, so
-    clicking Start twice (or re-running a setup cell) doesn't spawn a
-    second thread fighting over the same rvr.
+def _start_loop_thread(rvr, iteration_fn, poll_interval):
+    """Starts the shared dedicated thread underlying every behavior loop
+    in this module: repeatedly calls iteration_fn() at a fixed interval,
+    with the same idempotency and zero-speed safety net regardless of
+    what iteration_fn actually does (single-model classification,
+    two-stage classification, or anything else).
 
     Args:
-        rvr: from robot_utils.get_rvr()
-        camera (TraitletCamera): the live camera feed, already started
-        model (torch.nn.Module): a loaded, eval-mode model
-        class_names (list[str]): class names in the model's output order
-        device: torch.device the model lives on
-        decision_fn (callable): called every iteration as
-            decision_fn(rvr, label) -- this is where the actual behavior
-            logic lives, and is expected to command the robot directly
-            (e.g. rvr.raw_motors(...), rvr.drive_with_heading(...))
+        rvr: from robot_utils.get_rvr() -- used only for the safety-net
+            zero-speed command on exit; iteration_fn is responsible for
+            all normal driving commands
+        iteration_fn (callable): called with no arguments, once per cycle
         poll_interval (float): seconds between iterations; keep well
             under 2 seconds (the RVR's own command timeout)
 
@@ -79,9 +66,7 @@ def start_behavior_loop(rvr, camera, model, class_names, device, decision_fn, po
         try:
             while _behavior_loop_running:
                 try:
-                    frame = camera.value
-                    label, confidence = predict_image(model, frame, class_names, device)
-                    decision_fn(rvr, label)
+                    iteration_fn()
                 except Exception:
                     # Print any error immediately -- exceptions raised on a
                     # background thread inside Jupyter can otherwise
@@ -109,6 +94,108 @@ def start_behavior_loop(rvr, camera, model, class_names, device, decision_fn, po
     print('Autonomous behavior started.')
 
 
+def start_behavior_loop(rvr, camera, model, class_names, device, decision_fn, poll_interval=0.5):
+    """Starts a dedicated thread that repeatedly reads the camera,
+    classifies the current frame with a single model, and calls
+    decision_fn(rvr, label) to decide what the robot should do next.
+
+    poll_interval must stay comfortably under the RVR's ~2 second
+    command-timeout window -- the default of 0.5s means decision_fn gets
+    called, and can re-issue a drive command, about twice a second, so a
+    "keep driving" decision never goes stale enough for the RVR's own
+    safety timeout to kick in.
+
+    Idempotent: stops any previously running behavior loop first, so
+    clicking Start twice (or re-running a setup cell) doesn't spawn a
+    second thread fighting over the same rvr.
+
+    Args:
+        rvr: from robot_utils.get_rvr()
+        camera (TraitletCamera): the live camera feed, already started
+        model (torch.nn.Module): a loaded, eval-mode model
+        class_names (list[str]): class names in the model's output order
+        device: torch.device the model lives on
+        decision_fn (callable): called every iteration as
+            decision_fn(rvr, label) -- this is where the actual behavior
+            logic lives, and is expected to command the robot directly
+            (e.g. rvr.raw_motors(...), rvr.drive_with_heading(...))
+        poll_interval (float): seconds between iterations; keep well
+            under 2 seconds (the RVR's own command timeout)
+
+    Returns:
+        None
+    """
+    def iteration():
+        frame = camera.value
+        label, confidence = predict_image(model, frame, class_names, device)
+        decision_fn(rvr, label)
+
+    _start_loop_thread(rvr, iteration, poll_interval)
+
+
+def start_two_stage_behavior_loop(rvr, camera,
+                                   primary_model, primary_class_names, primary_device,
+                                   secondary_model, secondary_class_names, secondary_device,
+                                   decision_fn, trigger_label='blocked', poll_interval=0.5):
+    """Starts a dedicated thread that classifies each frame with a primary
+    model, and -- only when the primary model's prediction equals
+    `trigger_label` -- classifies that same frame again with a secondary
+    model, before calling decision_fn with both results.
+
+    This mirrors benchmark_two_model_pipeline.py's design: the secondary
+    model only runs when actually needed (e.g. only once the path is
+    'blocked'), and both classifications use the same captured frame --
+    no re-capture between stage 1 and stage 2. That benchmark measured
+    worst-case (both models running) latency well under both
+    poll_interval and the RVR's command timeout, so no special timing
+    accommodation is needed here.
+
+    Idempotent: stops any previously running behavior loop first, so
+    clicking Start twice (or re-running a setup cell) doesn't spawn a
+    second thread fighting over the same rvr.
+
+    Args:
+        rvr: from robot_utils.get_rvr()
+        camera (TraitletCamera): the live camera feed, already started
+        primary_model (torch.nn.Module): a loaded, eval-mode model, run
+            on every frame
+        primary_class_names (list[str]): class names in the primary
+            model's output order
+        primary_device: torch.device the primary model lives on
+        secondary_model (torch.nn.Module): a loaded, eval-mode model, run
+            only when the primary model predicts `trigger_label`
+        secondary_class_names (list[str]): class names in the secondary
+            model's output order
+        secondary_device: torch.device the secondary model lives on
+        decision_fn (callable): called every iteration as
+            decision_fn(rvr, primary_label, secondary_label) --
+            secondary_label is None whenever the secondary model didn't
+            run this cycle (primary_label != trigger_label)
+        trigger_label (str): the primary-model label that triggers the
+            secondary classification (default: 'blocked')
+        poll_interval (float): seconds between iterations; keep well
+            under 2 seconds (the RVR's own command timeout)
+
+    Returns:
+        None
+    """
+    def iteration():
+        frame = camera.value
+        primary_label, _primary_confidence = predict_image(
+            primary_model, frame, primary_class_names, primary_device
+        )
+
+        secondary_label = None
+        if primary_label == trigger_label:
+            secondary_label, _secondary_confidence = predict_image(
+                secondary_model, frame, secondary_class_names, secondary_device
+            )
+
+        decision_fn(rvr, primary_label, secondary_label)
+
+    _start_loop_thread(rvr, iteration, poll_interval)
+
+
 def stop_behavior_loop():
     """Stops the behavior loop started by start_behavior_loop(), if one is
     running. Safe to call even if no loop is running.
@@ -126,27 +213,29 @@ def stop_behavior_loop():
     _behavior_thread = None
 
 
-def create_start_stop_buttons(rvr, camera, model, class_names, device, decision_fn, poll_interval=0.5):
+def create_start_stop_buttons(start_fn, stop_fn=stop_behavior_loop):
     """Builds a large green Start button and a large red Stop button that
-    begin/end an autonomous behavior loop.
+    call start_fn()/stop_fn() respectively.
 
-    Nothing drives until Start is pressed, even though the cell that calls
+    Nothing runs until Start is pressed, even though the cell that calls
     this function (and sets everything up) has already run -- driving only
     begins on the button click, and Stop is always clickable regardless of
-    what the behavior loop is currently doing.
+    what's currently happening.
 
     Idempotent: safe to re-run the cell that calls this -- register_click_handler
     ensures re-running doesn't stack duplicate button handlers.
 
     Args:
-        rvr: from robot_utils.get_rvr()
-        camera (TraitletCamera): the live camera feed, already started
-        model (torch.nn.Module): a loaded, eval-mode model
-        class_names (list[str]): class names in the model's output order
-        device: torch.device the model lives on
-        decision_fn (callable): decision_fn(rvr, label) -- see
-            start_behavior_loop()
-        poll_interval (float): seconds between loop iterations
+        start_fn (callable): called with no arguments when Start is
+            clicked. Typically a small wrapper closing over whatever a
+            particular notebook's loop needs, e.g.:
+                lambda: start_behavior_loop(rvr, camera, model, class_names, device, decide_action)
+            or, for a two-stage behavior:
+                lambda: start_two_stage_behavior_loop(rvr, camera, ..., decide_action)
+        stop_fn (callable): called with no arguments when Stop is
+            clicked; defaults to this module's stop_behavior_loop, which
+            works regardless of which start_* function was used, since
+            both share the same underlying thread
 
     Returns:
         widgets.HBox: the Start/Stop button pair, ready to display()
@@ -156,10 +245,10 @@ def create_start_stop_buttons(rvr, camera, model, class_names, device, decision_
     stop_button = widgets.Button(description='Stop', button_style='danger', layout=button_layout)
 
     def on_start_clicked(button):
-        start_behavior_loop(rvr, camera, model, class_names, device, decision_fn, poll_interval)
+        start_fn()
 
     def on_stop_clicked(button):
-        stop_behavior_loop()
+        stop_fn()
 
     register_click_handler(start_button, on_start_clicked)
     register_click_handler(stop_button, on_stop_clicked)

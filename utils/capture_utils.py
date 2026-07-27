@@ -14,6 +14,7 @@ keeping any on-screen file counts accurate.
 """
 
 import os
+import shutil
 from uuid import uuid1
 
 
@@ -76,6 +77,38 @@ def save_image(image_bytes, directory, label=None):
         f.write(image_bytes)
 
     return image_path
+
+
+def copy_class_directory(source_dir, dest_dir):
+    """Copies all image files from source_dir into dest_dir, creating
+    dest_dir if needed. Skips .ipynb_checkpoints and any other
+    subdirectories, matching the filtering used elsewhere in this codebase
+    for class directories.
+
+    Useful for reusing an already-collected class of images (e.g. red/blue
+    from an earlier dataset) as part of a new, larger dataset, without
+    re-collecting that data from scratch.
+
+    Args:
+        source_dir (str): directory containing images for one class
+        dest_dir (str): destination directory for that class
+
+    Returns:
+        int: number of files copied
+    """
+    ensure_directory(dest_dir)
+
+    copied = 0
+    for filename in os.listdir(source_dir):
+        if filename == '.ipynb_checkpoints':
+            continue
+        source_path = os.path.join(source_dir, filename)
+        if not os.path.isfile(source_path):
+            continue
+        shutil.copy2(source_path, os.path.join(dest_dir, filename))
+        copied += 1
+
+    return copied
 
 
 def count_images(directory):
