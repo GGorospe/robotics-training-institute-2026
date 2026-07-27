@@ -15,6 +15,7 @@ Models and training records are written to /home/explorer/Models/ by default:
 import os
 import json
 import random
+import time
 from datetime import datetime
 
 from PIL import Image
@@ -31,6 +32,27 @@ import matplotlib.pyplot as plt
 from capture_utils import ensure_directory
 
 DEFAULT_MODELS_DIR = "/home/explorer/Models/"
+
+
+def format_duration(seconds):
+    """Formats a duration in seconds as a compact, human-readable string,
+    e.g. 45 -> '45s', 272 -> '4m 32s', 3735 -> '1h 02m 15s'.
+
+    Args:
+        seconds (float): duration in seconds
+
+    Returns:
+        str: human-readable duration
+    """
+    seconds = int(round(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+
+    if hours > 0:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes > 0:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
 
 
 IGNORED_DIRECTORY_NAMES = {'.ipynb_checkpoints'}
@@ -321,6 +343,11 @@ def print_training_summary(record):
     print(f"Learning rate:       {hyperparameters['learning_rate']}")
     print(f"Momentum:            {hyperparameters['momentum']}")
     print(f"Batch size:          {hyperparameters['batch_size']}")
+
+    duration_seconds = record.get('training_duration_seconds')
+    if duration_seconds is not None:
+        print(f"Training duration:   {format_duration(duration_seconds)}")
+
     print(f"Best epoch:          {record['best_epoch']}")
     print(f"Best test accuracy:  {record['best_test_accuracy']:.1%}")
     print(f"Model saved to:      {record['saved_model_path']}")
@@ -390,6 +417,8 @@ def train_model(model, train_loader, test_loader, device, class_names, data_dir,
     best_accuracy = 0.0
     best_epoch = 0
 
+    training_start_time = time.time()
+
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
@@ -423,6 +452,8 @@ def train_model(model, train_loader, test_loader, device, class_names, data_dir,
             best_accuracy = test_accuracy
             best_epoch = epoch + 1
 
+    training_duration_seconds = time.time() - training_start_time
+
     print("Training complete!")
 
     plot_training_history(history, model_name, save_path=plot_path)
@@ -442,6 +473,7 @@ def train_model(model, train_loader, test_loader, device, class_names, data_dir,
         },
         "best_epoch": best_epoch,
         "best_test_accuracy": best_accuracy,
+        "training_duration_seconds": training_duration_seconds,
         "saved_model_path": model_path,
         "training_plot_path": plot_path,
     }
